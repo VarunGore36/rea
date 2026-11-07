@@ -1,11 +1,12 @@
 import { expect, it, onTestFinished } from "vitest";
-import { writeFile } from "node:fs/promises";
+import { symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
 import { createHash } from "node:crypto";
 import { parseEvidence } from "../../../src/domain/evidence.js";
 import { gpuCodeObjectsPartialSchema } from "../../../src/domain/gpu/gpuCodeObjects.js";
 import { GpuCodeObjectsProvider } from "../../../src/gpu/GpuCodeObjectsProvider.js";
+import { BinaryTargetError } from "../../../src/domain/configurationErrors.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 import {
   cudaFixture,
@@ -1221,4 +1222,42 @@ it("refuses escaped PTX report expansion while preserving bounded interrupted fa
   expect(partial.ptx_artifacts).toEqual([]);
   expect(partial.objects).toHaveLength(1);
   expect(partial.artifact.sha256).toBeNull();
+});
+
+it("refuses a single symlink with resolved-path remediation", async () => {
+  const root = await createTestTempDirectory("rea-gpu-symlink-");
+  const path = join(root, "no-format-extension");
+  await writeFile(path, cudaFixture());
+  const provider = new GpuCodeObjectsProvider();
+  onTestFinished(() => provider.close());
+  const alias = join(root, "link");
+  await symlink(path, alias);
+  const result = await provider.inspect({ path: alias, analysis: "kernels" });
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("Expected symlink refusal");
+  const error = result.error as BinaryTargetError;
+  expect(error).toMatchObject({ _tag: "BinaryTargetError" });
+  expect(error.remediationAction).toContain(
+    `Retry with the resolved regular file path ${path}.`,
+  );
+});
+
+it("refuses a genuine symlink loop without a resolved path", async () => {
+  const root = await createTestTempDirectory("rea-gpu-loop-");
+  const path = join(root, "no-format-extension");
+  await writeFile(path, cudaFixture());
+  const provider = new GpuCodeObjectsProvider();
+  onTestFinished(() => provider.close());
+  const linkA = join(root, "loop-a");
+  const linkB = join(root, "loop-b");
+  await symlink(linkB, linkA);
+  await symlink(linkA, linkB);
+  const result = await provider.inspect({ path: linkA, analysis: "kernels" });
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("Expected loop refusal");
+  const error = result.error as BinaryTargetError;
+  expect(error).toMatchObject({ _tag: "BinaryTargetError" });
+  expect(error.remediationAction ?? "").not.toContain(
+    "Retry with the resolved regular file path",
+  );
 });

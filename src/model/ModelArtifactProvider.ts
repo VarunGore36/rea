@@ -28,6 +28,12 @@ import { ProviderAdapterError } from "../domain/providerAdapterError.js";
 import { err, ok, type Result } from "../domain/result.js";
 import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
+import { stableArtifactInputRecovery } from "../artifacts/StableArtifactFailure.js";
+import {
+  NonRegularFileReadError,
+  isSelectedRegularFileError,
+  sameRegularFileState,
+} from "../filesystem/RegularFile.js";
 import {
   withArtifactRegularFile,
   bindArtifactFileCleanup,
@@ -47,10 +53,6 @@ import {
 } from "./ModelFormat.js";
 import { jsonValueByteLength } from "../domain/jsonValueByteLength.js";
 import { ProviderCleanupError } from "../domain/providerCleanupError.js";
-import {
-  isSelectedRegularFileError,
-  sameRegularFileState,
-} from "../filesystem/RegularFile.js";
 
 const OPERATION = "inspect_model_artifact";
 /** One admitted descriptor and bounded report at a time; retained cleanup blocks new work. */
@@ -177,9 +179,19 @@ export class ModelArtifactProvider implements ModelArtifactPort {
           {},
           { cause: primary },
         );
-      else if (isSelectedRegularFileError(primary))
-        error = new BinaryTargetError(input.path, primary.message, { cause });
-      else
+      else if (isSelectedRegularFileError(primary)) {
+        const remediation =
+          primary instanceof NonRegularFileReadError &&
+          primary.resolvedPath !== undefined
+            ? {
+                remediationAction: `Retry with the resolved regular file path ${primary.resolvedPath}. The selected symlink is not admitted; the retry will validate the target again.`,
+              }
+            : {};
+        error = new BinaryTargetError(input.path, primary.message, {
+          cause,
+          ...remediation,
+        });
+      } else
         error = new ProviderAdapterError(this.identity.id, OPERATION, {
           cause,
           diagnostics: {

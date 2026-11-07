@@ -35,6 +35,12 @@ import {
   artifactFileCompletion,
 } from "../artifacts/ArtifactFileOperation.js";
 import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
+import { stableArtifactInputRecovery } from "../artifacts/StableArtifactFailure.js";
+import {
+  NonRegularFileReadError,
+  isSelectedRegularFileError,
+  sameRegularFileState,
+} from "../filesystem/RegularFile.js";
 import {
   BinaryFormatFailure,
   BinaryResourceFailure,
@@ -47,10 +53,6 @@ import {
 } from "./GpuSource.js";
 import { GpuInventory } from "./GpuInventory.js";
 import { ProviderCleanupError } from "../domain/providerCleanupError.js";
-import {
-  isSelectedRegularFileError,
-  sameRegularFileState,
-} from "../filesystem/RegularFile.js";
 
 const OPERATION = "inspect_gpu_code_objects";
 
@@ -168,9 +170,19 @@ export class GpuCodeObjectsProvider implements GpuCodeObjectsPort {
           primary.code,
           { cause: primary },
         );
-      else if (isSelectedRegularFileError(primary))
-        error = new BinaryTargetError(input.path, primary.message, { cause });
-      else if (
+      else if (isSelectedRegularFileError(primary)) {
+        const remediation =
+          primary instanceof NonRegularFileReadError &&
+          primary.resolvedPath !== undefined
+            ? {
+                remediationAction: `Retry with the resolved regular file path ${primary.resolvedPath}. The selected symlink is not admitted; the retry will validate the target again.`,
+              }
+            : {};
+        error = new BinaryTargetError(input.path, primary.message, {
+          cause,
+          ...remediation,
+        });
+      } else if (
         origin === "owned-or-classified" &&
         primary instanceof ArtifactReaderFailure &&
         primary.reason === "limit"

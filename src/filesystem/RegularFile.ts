@@ -1,7 +1,7 @@
 import { constants } from "node:fs";
 import { constants as osConstants } from "node:os";
 import type { BigIntStats, Stats } from "node:fs";
-import { lstat, open, stat, type FileHandle } from "node:fs/promises";
+import { lstat, open, realpath, stat, type FileHandle } from "node:fs/promises";
 
 import { settleChangeTimeBaseline } from "./ChangeTimeBaseline.js";
 import { OwnedFileHandle } from "./OwnedFileHandle.js";
@@ -23,14 +23,18 @@ export const assertRegularFileActive = (signal?: AbortSignal): void => {
 /** Identifies a selected path that cannot be read as one regular file. */
 export class NonRegularFileReadError extends Error {
   readonly code: "EISDIR" | "ENOTFILE";
+  /** Regular-file target behind a rejected selected symlink, when known. */
+  readonly resolvedPath: string | undefined;
 
   constructor(
     readonly path: string,
     directory: boolean,
+    resolvedPath?: string,
   ) {
     super(`Selected input must be a regular file: ${path}`);
     this.name = "NonRegularFileReadError";
     this.code = directory ? "EISDIR" : "ENOTFILE";
+    this.resolvedPath = resolvedPath;
   }
 }
 
@@ -189,6 +193,33 @@ const nonRegularOpenFailure = async (
   symlinks: "follow" | "reject",
   cause: unknown,
 ): Promise<NonRegularFileReadError | undefined> => {
+  // A symlink rejected by O_NOFOLLOW surfaces as ELOOP on hosts where it is
+  // available. Distinguish a single link (retryable with the resolved target)
+  // from a genuine loop (unresolvable, keep the raw errno).
+  if (
+    cause instanceof Error &&
+    Reflect.get(cause, "code") === "ELOOP" &&
+    symlinks === "reject"
+  ) {
+    const metadata = await lstat(path).catch(() => undefined);
+    if (metadata !== undefined && metadata.isSymbolicLink()) {
+      const resolved = await realpath(path).catch(() => undefined);
+      const target =
+        resolved !== undefined
+          ? await lstat(resolved).catch(() => undefined)
+          : undefined;
+      return new NonRegularFileReadError(
+        path,
+        false,
+        target !== undefined && target.isFile() && !target.isSymbolicLink()
+          ? resolved
+          : undefined,
+      );
+    }
+    // lstat itself hit ELOOP (genuine symlink chain) or another error; keep
+    // the raw errno so callers can tell a loop from a single link.
+    return undefined;
+  }
   // Only errors meaning "this file type cannot be opened" are reclassified;
   // permission, symlink-rejection and resource failures keep their codes.
   if (!isUnopenableFileTypeError(cause)) return undefined;

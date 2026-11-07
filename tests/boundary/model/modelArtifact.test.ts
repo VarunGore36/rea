@@ -3,6 +3,7 @@ import { open, writeFile, symlink, truncate } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it, onTestFinished } from "vitest";
 import { ModelArtifactProvider } from "../../../src/model/ModelArtifactProvider.js";
+import { BinaryTargetError } from "../../../src/domain/configurationErrors.js";
 import { ModelHeaderReader } from "../../../src/model/ModelHeaderReader.js";
 import {
   MODEL_JSON_NESTING,
@@ -1257,6 +1258,39 @@ it("bounds expansion before allocation and distinguishes unsupported pickle and 
   });
   if (invalid.ok) throw new Error("Relative path admitted");
   expect(invalid.error._tag).toBe("AnalysisInputError");
+});
+
+it("refuses a single symlink with resolved-path remediation", async () => {
+  const { provider, path, root } = await providerAt(ggufFixture().bytes);
+  const alias = join(root, "link");
+  await symlink(path, alias);
+  const linked = await provider.inspect({ path: alias, hash: "header" });
+  expect(linked.ok).toBe(false);
+  if (linked.ok) throw new Error("Expected symlink refusal");
+  const error = linked.error as BinaryTargetError;
+  expect(error).toMatchObject({
+    _tag: "BinaryTargetError",
+    message: expect.stringContaining("Selected input must be a regular file"),
+  });
+  expect(error.remediationAction).toContain(
+    `Retry with the resolved regular file path ${path}.`,
+  );
+});
+
+it("refuses a genuine symlink loop without a resolved path", async () => {
+  const { provider, root } = await providerAt(ggufFixture().bytes);
+  const linkA = join(root, "loop-a.gguf");
+  const linkB = join(root, "loop-b.gguf");
+  await symlink(linkB, linkA);
+  await symlink(linkA, linkB);
+  const linked = await provider.inspect({ path: linkA, hash: "header" });
+  expect(linked.ok).toBe(false);
+  if (linked.ok) throw new Error("Expected loop refusal");
+  const error = linked.error as BinaryTargetError;
+  expect(error).toMatchObject({ _tag: "BinaryTargetError" });
+  expect(error.remediationAction ?? "").not.toContain(
+    "Retry with the resolved regular file path",
+  );
 });
 
 it("reads only the exact header, even when it ends in the middle of a normal buffer", async () => {
